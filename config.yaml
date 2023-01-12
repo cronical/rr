@@ -1,0 +1,4 @@
+# configuration items
+pwd: ~/track_plans
+xtc: gen2f.xtc
+csv: gen2f.csv
