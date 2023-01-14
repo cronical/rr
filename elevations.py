@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 '''Read connected track defined and computed elevations out of the xtrkcad file and save into a csv'''
+import logging
 from os import path
 import re
 import yaml
 import pandas as pd
 
+logging.basicConfig(level=logging.INFO)
 
 def get_df(in_file):
   '''parse the input file into a dataframe'''
@@ -48,21 +50,20 @@ def get_df(in_file):
 
 def sort_connected(df): 
   '''put adjacent tracks in order'''
-  
   new_df=pd.DataFrame(columns=df.columns)
   usage=new_df[['part_index','connects_to']].value_counts()
   parts_to_do=[df.part_index.min()]
   while len(parts_to_do)>0:
     current_part=parts_to_do.pop(0)
-    print(f'current part: {current_part}')
+    logging.debug(f'current part: {current_part}')
     end_points=df.loc[df.part_index==current_part]
-    print (f'   endpoints:\n{end_points}')
+    logging.debug (f'   endpoints:\n{end_points}')
     for idx,row in end_points.iterrows(): # loop through endpoints for this part and put at end of queue
       conn_to_part=row['connects_to']
       enqueue=conn_to_part not in new_df.part_index.to_list() # potentially add to queue
       exists=((new_df.part_index==row.part_index) & (new_df.connects_to==row.connects_to))
       if exists.sum()==0:
-        print(f'adding ({row.part_index},{row.connects_to})')
+        logging.debug(f'adding ({row.part_index},{row.connects_to})')
         new_df=pd.concat([new_df,end_points.loc[[idx]]]) 
         usage=new_df[['part_index','connects_to']].value_counts()
 
@@ -70,24 +71,28 @@ def sort_connected(df):
         continue # if both ends are accounted for skip this row   
       if enqueue:
         parts_to_do.insert(0,conn_to_part) # insert in queue
-    print(f'queue is now {parts_to_do}')
+    logging.debug(f'queue is now {parts_to_do}')
   new_df.reset_index(drop=True,inplace=True)
   return new_df
 
 def write_csv(df,out_file):
   '''write out the csv'''
   df.to_csv(out_file,sep=',')
-  print (f'Wrote output to: {out_file}')
+  logging.debug (f'Wrote output to: {out_file}')
 
 def main():
   '''the main routine'''
+
+
   with open ('config.yaml',encoding='UTF-8') as f:
     config=yaml.safe_load(f)
 
   in_file=config['pwd']+path.sep+config['xtc']
   out_file=config['pwd']+path.sep+config['csv']
   df=get_df(in_file=in_file)
+  logging.info (f'input file has {df.shape[0]} rows')
   df=sort_connected(df)
+  logging.info (f'sorted file has {df.shape[0]} rows')
   write_csv(df,out_file)
 
 if __name__=='__main__':
