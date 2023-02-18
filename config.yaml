@@ -1,4 +1,5 @@
 # configuration items
 pwd: ~/track_plans
+docs: docs/
 xtc: gen2h.xtc
-csv: gen2h.csv
+graph_file: network.png
