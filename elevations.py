@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 '''Read connected track defined and computed elevations out of the xtrkcad file and save into a csv'''
 import logging
-import math
 from os import path
 import re
 
@@ -11,7 +10,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from part_class import Part,get_length,fmt_node_id
+from part_class import Part,fmt_node_id
 
 logging.basicConfig(level=logging.INFO)
 
@@ -85,22 +84,32 @@ def step_len_div(part) -> list:
     divs+=[path['divergence']]
   return lens,divs
 
-def parts_to_graph(parts)-> nx.Graph:
-  '''convert to graph so we can find paths between defined elevations and thus compute slopes and elevations where they are not defined'''
+def parts_to_graph(parts):
+  '''convert to graph so we can find paths between defined elevations and thus compute slopes and elevations where they are not defined
+  while we are at it, also accumulate the positions of the nodes.
+  returns the graph and a dictionary of node positions
+  '''
   G=nx.Graph()
+  pos={}
   unconnected=0 # replace unconnected endpoint reference numbers with negatives
   for part in parts:
     match part.part_type:
       case 'STRAIGHT' | 'CURVE':
-        end_points=[a[0] for a in part.end_points]
-        node_ids=[]
-        for end_point in end_points:
-          if end_point is None:
+        connects_to=[a[0] for a in part.end_points]
+        nodes={}# node_id & heights
+        for ix,adjacent_part in enumerate(connects_to):
+          if adjacent_part is None:
             unconnected+=-1
-            end_point=unconnected
-          node_ids+=[fmt_node_id(part.id,end_point)]
-        u,v=node_ids
-        G.add_edge(u,v,length=part.length,part_id=str(part))
+            adjacent_part=unconnected
+          node_id=fmt_node_id(part.id,adjacent_part)  
+          nodes[node_id]=part.end_points[ix][3]# the height or zero if not yet known
+          pos[node_id]=np.array(part.end_points[ix][1:3]) # the x and y values. Gets both ends due to loop
+          # if its connected, this will happen twice
+        u,v=nodes.keys()
+        G.add_edge(u,v,length=part.length,part_id=str(part),weight=1/part.length)
+        for node_id,height in nodes.items():
+          G.nodes[node_id]['height']=height
+          pass
       case 'TURNOUT':
         # match up the connections to the paths by
         # 1) finding the set of segments that are shared by paths (assert this is singular)
@@ -118,29 +127,54 @@ def parts_to_graph(parts)-> nx.Graph:
         assert 1==sel.sum()
         node_start,angle_start=ep_df.loc[sel,['connects_to','angle']].squeeze().tolist()
         from_node_id=fmt_node_id(part.id,node_start)
+        xyz=np.array(ep_df.loc[sel,['x','y','z']].squeeze())
+        from_height=xyz[2]
+        pos[from_node_id]=xyz[0:2]
         path_lengths,path_divergences=step_len_div(part)
 
         pdl=pd.DataFrame({'divergence':path_divergences,'length':path_lengths})
-        for _,row in pdl.iterrows():
+        for ix,row in pdl.iterrows():
           angle_end=row['divergence']+(180+angle_start)%360 # the other end is going the opposite direction
           sel=np.isclose(ep_df['angle'],angle_end,.001)
           assert 1==sum(sel)
           to=sorted([part.id,ep_df.loc[sel,'connects_to'].squeeze()])
           to_node_id=fmt_node_id(*to)
-          G.add_edge(from_node_id,to_node_id,length=row['length'],part_id=str(part))
+          xyz=np.array(ep_df.loc[sel,['x','y','z']].squeeze())
+          pos[to_node_id]=xyz[0:2]
+          part_path=str(part)+'-%d'%(ix+1)
+          G.add_edge(from_node_id,to_node_id,length=row['length'],part_id=part_path,weight=1/row['length'])
+          G.nodes[to_node_id]['height']=xyz[2]
+        G.nodes[from_node_id]['height']=from_height
+        pass
+  for node in G.nodes:
+    assert node in pos,'missing position'  
   logging.info('Converted to graph')
-  return G      
+  return G,pos      
 
-def draw_graph(G,path):
-  '''Draw the graph and store at path'''
+def draw_graph(G,path,physical_pos=None):
+  '''Draw the graph and store at path
+  If physical_pos is provided, it is used for the node locations'''
   plt.figure(figsize=(20,10),)
   plt.axis('off')
   plt.tight_layout(pad=0)
-  edge_labels = dict([((n1, n2), d['part_id']) for n1, n2, d in G.edges(data=True)])
-  #pos=nx.spring_layout(G,k=0.16)
-  pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
-  nx.draw_networkx(G, pos,with_labels=False,node_size=50)
-  nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,font_size=10)
+  color_map=[]
+  height_labels={}
+  for node in G:
+    h=G.nodes[node]['height']
+    if h>0:
+      color_map.append('yellow')
+      height_labels[node]=('%.3f'%h)
+    else:
+      color_map.append('blue')
+  edge_labels = dict([((n1, n2), d['part_id']) for n1, n2, d in G.edges(data=True)]) # +'\n%.2f'%d['length']
+  if physical_pos is not None:
+    pos=physical_pos
+  else:
+    #pos=nx.spring_layout(G,weight='weight')
+    pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
+  nx.draw_networkx(G, pos,node_color=color_map,with_labels=False,node_size=50)
+  nx.draw_networkx_labels(G,pos,height_labels,horizontalalignment='right',verticalalignment='bottom',font_size=8,font_color='b')
+  nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,font_size=6)
   plt.savefig(path)
   logging.info('Displayed graph in file %s'%(path))
 
@@ -149,11 +183,13 @@ def main():
   with open ('config.yaml',encoding='UTF-8') as f:
     config=yaml.safe_load(f)
   in_file=config['pwd']+path.sep+config['xtc']
-  graph_file=config['docs']+path.sep+config['graph_file']
+  physcial_file=config['docs']+path.sep+config['physical_graph_file']
+  logical_file=config['docs']+path.sep+config['logical_graph_file']
   parts=read_input(in_file=in_file)
   logging.info (f'input file has {len(parts)} parts')
-  G=parts_to_graph(parts)
-  draw_graph(G,graph_file)
+  G,pos=parts_to_graph(parts)
+  draw_graph(G,physcial_file,pos)
+  draw_graph(G,logical_file)
 
 
 if __name__=='__main__':

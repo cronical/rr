@@ -2,4 +2,5 @@
 pwd: ~/track_plans
 docs: docs/
 xtc: gen2h.xtc
-graph_file: network.png
+logical_graph_file: logical_layout.png
+physical_graph_file: physical_layout.png
