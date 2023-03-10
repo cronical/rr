@@ -9,27 +9,39 @@ def decorate(df) -> pd.DataFrame:
   for fld in ['part_index','connects_to']:
     df[fld]='T' + df[fld].astype(str)
   return df
-def fmt_node_id(a,b):
+def fmt_node_id(part_a,connects_to=None,end_ref=None):
   '''create string node-id 
-  argument: two integers, which are the part IDs that are connected
-    If less than zero it indicates that it is not connected. 
+  argument: 
+    The part object that is connecting and either 
+    connects_to: another part object or
+    end_ref: a sequential number to distinguish all between the items that are not connected 
   returns: a string with the lower valid part number 1st followed by a hyphen and the higher part number,
     unless there is a negative, in which case the unconnected item comes 2nd
-    Decorators T (connected) and E (ends) are used to make them node name more readable.
+    Decorators are used to make them node name more readable:
+      C curve
+      E an unconnected node (ends)
+      S straight
+      T turnout
   examples:
-    T86-T97 - The place where parts 86 and 97 connect.
-    T101-E5 - A siding that ends
-    E9-E6 - a loose piece of track
-    T86-T97a - TODO distinguish when pathologically two tracks connect to each other
+    S95-T99 - The place where parts straight 86 and turnout 97 connect.
+    C101-E5 - A curve that ends
+  
+  assumes that two tracks never connect to each other twice
   '''
-  ab=np.asarray([a,b])
-  match sum(np.sign(ab)):
-    case 2:
-      r='T%d-T%d'%(min(ab),max(ab))
-    case 0:
-      r='T%d-E%d'%(ab.max(),abs(ab.min()))
-    case -2:
-      r='E%d-E%d'%(abs(ab.min()),abs(ab.max()))
+  assert (connects_to is None) != (end_ref is None),'Exactly one of connects_to and end_ref should be provided'
+  a=str(part_a)
+  decorators=[a[0]]
+  ids=[int(a[1:])]
+  if connects_to is not None:
+    b=str(connects_to)
+    decorators+=[b[0]]
+    ids+=[int(b[1:])]
+    a=sorted(list(zip(ids,decorators)))
+  else:
+    decorators+=['E']
+    ids+=[end_ref]
+    a=list(zip(ids,decorators))
+  r='-'.join([t+str(i)for i,t in a])
   return r 
 def fmt_point(point)->str:
   '''format pairs as points'''
@@ -80,7 +92,7 @@ class Part:
   
   def __str__(self):
     '''return code + part number where code S=straight, C=curve, T=Turnout'''
-    return '%s %d'%(self.part_type[0:1],self.id)  
+    return '%s%d'%(self.part_type[0:1],self.id)  
 
   def __repr__(self):
     str='%s %d'%(self.part_type,self.id)
