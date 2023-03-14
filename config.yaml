@@ -4,3 +4,4 @@ docs: docs/
 xtc: gen2h.xtc
 logical_graph_file: logical_layout.png
 physical_graph_file: physical_layout.png
+span_tree_file: span_tree.png
