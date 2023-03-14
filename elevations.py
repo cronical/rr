@@ -2,7 +2,7 @@
 '''Read connected track defined and computed elevations out of the xtrkcad file and save into a csv'''
 import logging
 from os import path
-import pprint
+
 import re
 
 import matplotlib.pyplot as plt
@@ -85,15 +85,18 @@ def step_len_div(part) -> list:
     lens+=[path['length']]
     divs+=[path['divergence']]
   return lens,divs
-
-def parts_to_graph(parts_list):
-  '''convert to graph so we can find paths between defined elevations and thus compute slopes and elevations where they are not defined
-  while we are at it, also accumulate the positions of the nodes.
-  returns the graph and a dictionary of node positions
-  '''
+def parts_as_dict(parts_list):
+  '''convert parts list to a dict'''
   parts={}
   for part in parts_list:
     parts[part.id]=part
+  return parts
+
+def parts_to_graph(parts):
+  '''convert parts dict to graph so we can find paths between defined elevations and thus compute slopes and elevations where they are not defined
+  while we are at it, also accumulate the positions of the nodes.
+  returns the graph and a dictionary of physical node positions
+  '''
   G=nx.Graph()
   pos={}
   unconnected=0 # replace unconnected endpoint references with sequential numbers
@@ -111,11 +114,11 @@ def parts_to_graph(parts_list):
           nodes[node_id]=part.end_points[ix][3]# the height or zero if not yet known
           pos[node_id]=np.array(part.end_points[ix][1:3]) # the x and y values. Gets both ends due to loop
           # if its connected, this will happen twice
+        for node_id,height in nodes.items():
+          G.add_node(node_id,height=height)
         u,v=nodes.keys()
         G.add_edge(u,v,length=part.length,part_id=str(part),weight=1/part.length)
-        for node_id,height in nodes.items():
-          G.nodes[node_id]['height']=height
-          pass
+        pass
       case 'TURNOUT':
         # match up the connections to the paths by
         # 1) finding the set of segments that are shared by paths (assert this is singular)
@@ -137,6 +140,7 @@ def parts_to_graph(parts_list):
         from_height=xyz[2]
         pos[from_node_id]=xyz[0:2]
         path_lengths,path_divergences=step_len_div(part)
+        G.add_node(from_node_id,height=from_height)
 
         pdl=pd.DataFrame({'divergence':path_divergences,'length':path_lengths})
         for ix,row in pdl.iterrows():
@@ -148,9 +152,8 @@ def parts_to_graph(parts_list):
           xyz=np.array(ep_df.loc[sel,['x','y','z']].squeeze())
           pos[to_node_id]=xyz[0:2]
           part_path=str(part)+'-%d'%(ix+1)
+          G.add_node(to_node_id,height=xyz[2])
           G.add_edge(from_node_id,to_node_id,length=row['length'],part_id=part_path,weight=1/row['length'])
-          G.nodes[to_node_id]['height']=xyz[2]
-        G.nodes[from_node_id]['height']=from_height
         pass
   for node in G.nodes:
     assert node in pos,'missing position'  
@@ -178,28 +181,23 @@ def draw_graph(G,path,physical_pos=None,edge_color=None):
   else:
     #pos=nx.spring_layout(G,weight='weight')
     pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
-  nx.draw_networkx(G, pos,node_color=color_map,with_labels=False,node_size=50,edge_color=edge_color,width=2)
+  nx.draw_networkx(G, pos,node_color=color_map,with_labels=False,node_size=50,edge_color=edge_color,width=4)
   nx.draw_networkx_labels(G,pos,height_labels,horizontalalignment='right',verticalalignment='bottom',font_size=8,font_color='b')
-  #nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,font_size=6)
+  nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,font_size=6)
   plt.savefig(path)
   logging.info('Displayed graph in file %s'%(path))
 
-def main():
-  '''the main routine'''
-  with open ('config.yaml',encoding='UTF-8') as f:
-    config=yaml.safe_load(f)
-  in_file=config['pwd']+path.sep+config['xtc']
-  physcial_file=config['docs']+path.sep+config['physical_graph_file']
-  logical_file=config['docs']+path.sep+config['logical_graph_file']
-  parts=read_input(in_file=in_file)
-  logging.info (f'input file has {len(parts)} parts')
-  G,pos=parts_to_graph(parts)
-  chains=list(nx.chain_decomposition(G))
+def color_edge_sets(G,edge_sets):
+  '''Establish colors for each edge found in the edge_sets
+  edge_sets is a list of lists.  If the edge is not found the reverse of the edge is tried.
+  returns an array of color codes'''
+  default='tab:red'
+  colors=list(set(mcolors.TABLEAU_COLORS.keys())-set(default))
   edge_list=list(G.edges())
-  colors=list(set(mcolors.TABLEAU_COLORS.keys())-set('tab:red'))
-  edge_color=['tab:red']*len(edge_list)
+  edge_color=[default]*len(edge_list)
   cx=0
-  for chain in chains:
+  for n,chain in enumerate(edge_sets):
+    logging.info('%d. len: %d, starts: %s, ends: %s'%(n,len(chain),chain[0],chain[-1]))
     for edge in chain:
       if edge in edge_list:
         ix=edge_list.index(edge)
@@ -209,11 +207,93 @@ def main():
           ix=edge_list.index(edge)
         else:
           assert False, 'Cannot locate edge or the reverse of edge'
+      assert edge_color[ix]==default, 'over writing a color'
       edge_color[ix]=colors[cx%len(colors)]
     cx+=1
+  return edge_color
+
+def walk_tree(tree,current_node,processed=[],node_line=[],depth=0):
+  '''follow each branch/stem on the tree
+  tree is a spanning tree as a networkx graph
+  current_node is the node name (start with the root)
+  processed is a list of nodes already processed (used to filter to prevent loops)
+  node_line is an array of node ids and height pairs that accumulate until a slope can be calculated
+  depth tracks recursion
+  returns processed, line as revised.
+  '''
+  done=False
+  processed.append(current_node)
+  if depth==0:
+    node_info=dict(tree[current_node])
+    node_info.setdefault('height',0)
+    node_line.append([current_node,node_info['height']])
+    logging.info('Start node: %s. height=%.3f'%(current_node,node_line[-1][1]))
+  while not done:
+    paths=dict(tree[current_node])
+    for node_id in set(paths.keys()).intersection(set(processed)):
+      del paths[node_id]
+    if len(paths)==0:
+      done=True
+      continue
+    for node_id,attributes in paths.items():
+      node_info=dict(tree.nodes[node_id])
+      height=node_info['height']
+      node_line.append([node_id,height])
+      logging.info('Node: %s. height=%.3f'%(node_id,height))
+      logging.debug('      Edge %s: length = %.3f'%(attributes['part_id'],attributes['length']))
+      if height !=0:
+        logging.info('Node %s has non-zero height'%node_id)
+        if node_line[0][1]==0: # default leading zero to make it level with 1st defined value
+          node_line[0][1]=height
+        start_height=node_line[0][1]
+        df=pd.DataFrame(node_line,columns=['node1','height'])
+        nodes=df['node1'].to_list()
+        edge_ids=list(zip(nodes[:-1],nodes[1:]))
+        edge_lens=[0]*len(edge_ids)
+        for e, datadict in tree.edges.items():
+          for edg in (e,(e[1],e[0])):
+            if edg in edge_ids:
+              edge_lens[edge_ids.index(edg)]=datadict['length']
+        df.drop(df.tail(1).index,inplace=True) # the last row is the point that is already defined
+        df['edge']=edge_ids
+        df['length']=edge_lens
+        slope=(height-df.head(1).height)/df.length.sum().squeeze()
+        df['height']=df.length.cumsum(axis=0).apply(lambda x: start_height+x*slope)
+        df.set_index('node1',inplace=True)
+        att=df[['height']].to_dict('index')
+        nx.set_node_attributes(tree,att)
+        logging.info(df.height)
+        node_line=[[node_id,height]]
+        pass
+      processed,node_line=walk_tree(tree,node_id,processed,node_line,depth=depth+1)
+      pass
+  logging.info('stack depth = %d'% depth)
+  return processed,node_line
+
+def main():
+  '''the main routine'''
+  with open ('config.yaml',encoding='UTF-8') as f:
+    config=yaml.safe_load(f)
+  in_file=config['pwd']+path.sep+config['xtc']
+  base=config['docs']+path.sep
+  physcial_file=base+config['physical_graph_file']
+  logical_file=base+config['logical_graph_file']
+  span_tree_file=base+config['span_tree_file']
+  parts=read_input(in_file=in_file)
+  parts=parts_as_dict(parts)
+  logging.info (f'input file has {len(parts)} parts')
+  G,pos=parts_to_graph(parts)
+  logging.info('Graph has %d nodes'%len(list(G.nodes())))
+  span_tree = nx.minimum_spanning_tree(G)
+  logging.info('Spanning tree node count= %d'%(len(list(span_tree.nodes()))))
+  root='S116-E2'
+  processed,line=walk_tree(span_tree,root)
+  logging.info('Processed %d nodes'%len(processed))
+  draw_graph(span_tree,span_tree_file)
+  chains=list(nx.chain_decomposition(G,root=root))
+  edge_color=color_edge_sets(G,chains)
   draw_graph(G,physcial_file,pos,edge_color)
   draw_graph(G,logical_file,edge_color=edge_color)
-
 
 if __name__=='__main__':
   main()
