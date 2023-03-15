@@ -180,10 +180,10 @@ def draw_graph(G,path,physical_pos=None,edge_color=None):
     pos=physical_pos
   else:
     #pos=nx.spring_layout(G,weight='weight')
-    pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
+    pos=nx.nx_pydot.graphviz_layout(G,prog='sfdp')
   nx.draw_networkx(G, pos,node_color=color_map,with_labels=False,node_size=50,edge_color=edge_color,width=4)
-  nx.draw_networkx_labels(G,pos,height_labels,horizontalalignment='right',verticalalignment='bottom',font_size=8,font_color='b')
-  nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,font_size=6)
+  nx.draw_networkx_labels(G,pos,height_labels,horizontalalignment='right',verticalalignment='bottom',font_size=6,font_color='b')
+  nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,font_size=6,rotate=False)
   plt.savefig(path)
   logging.info('Displayed graph in file %s'%(path))
 
@@ -230,7 +230,7 @@ def walk_tree(tree,current_node,processed=[],node_line=[],depth=0):
     logging.info('Start node: %s. height=%.3f'%(current_node,node_line[-1][1]))
   while not done:
     paths=dict(tree[current_node])
-    for node_id in set(paths.keys()).intersection(set(processed)):
+    for node_id in set(paths.keys()).intersection(set(processed)): # remove the path we came in on
       del paths[node_id]
     if len(paths)==0:
       done=True
@@ -286,7 +286,7 @@ def main():
   logging.info('Graph has %d nodes'%len(list(G.nodes())))
   span_tree = nx.minimum_spanning_tree(G)
   logging.info('Spanning tree node count= %d'%(len(list(span_tree.nodes()))))
-  root='S116-E2'
+  root='S115-E2'
   processed,line=walk_tree(span_tree,root)
   logging.info('Processed %d nodes'%len(processed))
   draw_graph(span_tree,span_tree_file)
