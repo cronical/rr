@@ -222,6 +222,7 @@ def walk_tree(tree,current_node,processed=[],node_line=[],depth=0):
   returns processed, line as revised.
   '''
   done=False
+  logging.info('entering walk at stack depth = %d'% depth)
   processed.append(current_node)
   if depth==0:
     node_info=dict(tree[current_node])
@@ -241,12 +242,19 @@ def walk_tree(tree,current_node,processed=[],node_line=[],depth=0):
       node_line.append([node_id,height])
       logging.info('Node: %s. height=%.3f'%(node_id,height))
       logging.debug('      Edge %s: length = %.3f'%(attributes['part_id'],attributes['length']))
-      if height !=0:
+      df=pd.DataFrame(node_line,columns=['node1','height'])
+      neighbor_count=len(list(tree.neighbors(node_id)))
+      if neighbor_count==1: # this node has no neighbors other than the path we came in on
+        if height==0:
+          last_height=df.loc[df.height!=0].tail(1)['height'].squeeze()
+          height=last_height
+          df.iloc[-1,df.columns.get_loc('height')]=height
+      if height !=0: # we have hit a node with a defined height, so interpolate
         logging.info('Node %s has non-zero height'%node_id)
         if node_line[0][1]==0: # default leading zero to make it level with 1st defined value
           node_line[0][1]=height
         start_height=node_line[0][1]
-        df=pd.DataFrame(node_line,columns=['node1','height'])
+        
         nodes=df['node1'].to_list()
         edge_ids=list(zip(nodes[:-1],nodes[1:]))
         edge_lens=[0]*len(edge_ids)
@@ -265,9 +273,12 @@ def walk_tree(tree,current_node,processed=[],node_line=[],depth=0):
         logging.info(df.height)
         node_line=[[node_id,height]]
         pass
-      processed,node_line=walk_tree(tree,node_id,processed,node_line,depth=depth+1)
-      pass
-  logging.info('stack depth = %d'% depth)
+      if neighbor_count>1:# if there is a forward path take it
+        processed,node_line=walk_tree(tree,node_id,processed,node_line,depth=depth+1)
+        pass
+      else:
+        done=True
+  logging.info('exiting walk at stack depth = %d'% depth)
   return processed,node_line
 
 def main():
