@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 '''Read connected track defined and computed elevations out of the xtrkcad file and save into a csv'''
 import logging
+from math import isnan, atan, degrees
 from os import path
 
 import re
@@ -212,18 +213,24 @@ def color_edge_sets(G,edge_sets):
     cx+=1
   return edge_color
 
-def walk_tree(tree,current_node,processed=[],node_line=[],depth=0):
+def walk_tree(tree,current_node,processed=[],node_line=[],depth=0,next_ramp=0):
   '''follow each branch/stem on the tree
   tree is a spanning tree as a networkx graph
   current_node is the node name (start with the root)
   processed is a list of nodes already processed (used to filter to prevent loops)
   node_line is an array of node ids and height pairs that accumulate until a slope can be calculated
   depth tracks recursion
-  returns processed, line as revised.
+  next_ramp is the number to associate with the next ramp 
+  returns 
+    processed, 
+    node_line as revised, 
+    epe = endpoints encountered
+    next_ramp
   '''
   done=False
-  logging.info('entering walk at stack depth = %d'% depth)
+  logging.debug('entering walk at stack depth = %d'% depth)
   processed.append(current_node)
+  epe=0
   if depth==0:
     node_info=dict(tree[current_node])
     node_info.setdefault('height',0)
@@ -233,53 +240,102 @@ def walk_tree(tree,current_node,processed=[],node_line=[],depth=0):
     paths=dict(tree[current_node])
     for node_id in set(paths.keys()).intersection(set(processed)): # remove the path we came in on
       del paths[node_id]
-    if len(paths)==0:
+    if len(paths)==0: # if there are no paths exit this recursion level
       done=True
       continue
-    for node_id,attributes in paths.items():
+
+    # otherwise, take each path in turn
+    for node_id,path_attr in paths.items():
       node_info=dict(tree.nodes[node_id])
       height=node_info['height']
+      logging.debug('Node: %s. height=%.3f'%(node_id,height))
+      logging.debug('      Edge %s: length = %.3f'%(path_attr['part_id'],path_attr['length']))
+
+      # add the node on this path to the stack
       node_line.append([node_id,height])
-      logging.info('Node: %s. height=%.3f'%(node_id,height))
-      logging.debug('      Edge %s: length = %.3f'%(attributes['part_id'],attributes['length']))
       df=pd.DataFrame(node_line,columns=['node1','height'])
+      df.set_index('node1',inplace=True)
+      assert df.height.isnull().values.any()==False, 'Bad height'# pylint: disable=singleton-comparison
+
+      # determine if this is an end point in the spanning tree
       neighbor_count=len(list(tree.neighbors(node_id)))
       if neighbor_count==1: # this node has no neighbors other than the path we came in on
-        if height==0:
-          last_height=df.loc[df.height!=0].tail(1)['height'].squeeze()
+        if height==0: # default the height of this node if neede be
+          sel=df.height!=0
+          assert sel.values.any(), 'no heights in node line'
+          last_height=df.loc[sel].tail(1)['height'].squeeze()
           height=last_height
           df.iloc[-1,df.columns.get_loc('height')]=height
-      if height !=0: # we have hit a node with a defined height, so interpolate
-        logging.info('Node %s has non-zero height'%node_id)
-        if node_line[0][1]==0: # default leading zero to make it level with 1st defined value
+
+      # when we have hit a node with a defined height, interpolate
+      if height !=0: 
+        #Node %s has non-zero height.
+
+        # if this is the only defined height, default start to make it level with this node's value
+        if (df.height==0).head(-1).values.all():  
           node_line[0][1]=height
-        start_height=node_line[0][1]
+          df.iloc[0,df.columns.get_loc('height')]=height
         
-        nodes=df['node1'].to_list()
-        edge_ids=list(zip(nodes[:-1],nodes[1:]))
-        edge_lens=[0]*len(edge_ids)
+
+        # number of nodes to and including the most recent one with a height
+        ramp_size=2+list(reversed((df.height.head(-1)>0).to_list())).index(True) # 2 = 1 for origin and 1 for this node
+        df=df.tail(ramp_size) # this is the section that has the same slope
+        start_height=df.head(1).height.squeeze()
+        nodes=df.index.to_list()
+        edge_ids=list(zip(nodes[:-1],nodes[1:])) # all the edges in the same slope section
+        edge_lens=[0]*len(edge_ids) # no great way found to get the length values for the edges without looping
         for e, datadict in tree.edges.items():
           for edg in (e,(e[1],e[0])):
             if edg in edge_ids:
               edge_lens[edge_ids.index(edg)]=datadict['length']
-        df.drop(df.tail(1).index,inplace=True) # the last row is the point that is already defined
-        df['edge']=edge_ids
-        df['length']=edge_lens
-        slope=(height-df.head(1).height)/df.length.sum().squeeze()
-        df['height']=df.length.cumsum(axis=0).apply(lambda x: start_height+x*slope)
-        df.set_index('node1',inplace=True)
+        df['length']=0
+        df.loc[nodes[:-1],'length']=edge_lens # all the found lengths are now in the dataframe
+
+        if (df.length.head(-1)==0).values.any():  # display those not found
+          logging.error('Bad length at')
+          logging.error(df.loc[df.length==0])
+        start_height=df.head(1).height
+        ramp_len=df.length.sum().squeeze()
+        slope=(height-start_height).squeeze()/ramp_len
+        s,e=df.index.values[1],df.index.values[-1]
+        logging.info('Ramp %d. %d edges: [%s...%s] Heights: %.3f %.3f. Tot len: %.3f. Grade: %.3f'%(next_ramp,ramp_size-1,s,e,start_height,height,ramp_len,slope*100))
+
+        # die if the total length of the section is zero.
+        assert not isnan(slope), 'Bad slope'# pylint: disable=singleton-comparison
+
+        # put the computed heights in the dataframe
+        df['cum']=df.length.cumsum(axis=0).shift(fill_value=0)
+        df['height']=df.cum.apply(lambda x: start_height+x*slope)
+        # and then into a dict
         att=df[['height']].to_dict('index')
+        # and then into the spanning tree
         nx.set_node_attributes(tree,att)
-        logging.info(df.height)
-        node_line=[[node_id,height]]
-        pass
-      if neighbor_count>1:# if there is a forward path take it
-        processed,node_line=walk_tree(tree,node_id,processed,node_line,depth=depth+1)
-        pass
+        logging.debug('Set height for %d nodes'%df.shape[0])
+
+        # mark the edges with the ramp (section) number
+        df=pd.DataFrame(columns=['edge_id'])
+        df['edge_id']=edge_ids
+        df.set_index('edge_id',inplace=True)
+        df['ramp_id']=next_ramp
+        att=df[['ramp_id']].to_dict('index')
+        nx.set_edge_attributes(tree,att)
+        logging.debug('Set ramp_id for %d edges'%df.shape[0])
+        next_ramp+=1
+
+      # if there is a forward path take it
+      if neighbor_count>1:
+        processed,node_line,epf,next_ramp=walk_tree(tree,node_id,processed,node_line,depth=depth+1,next_ramp=next_ramp)
+        epe+=epf
       else:
-        done=True
-  logging.info('exiting walk at stack depth = %d'% depth)
-  return processed,node_line
+        epe+=1
+      removed=node_line.pop()
+      logging.debug('Removed line node %s'%removed[0])
+    done=True
+  logging.debug('exiting walk at stack depth = %d'% depth)
+  if depth==0:
+    removed=node_line.pop()
+    logging.debug('Removed line node %s'%removed[0])
+  return processed,node_line,epe,next_ramp
 
 def main():
   '''the main routine'''
@@ -298,8 +354,11 @@ def main():
   span_tree = nx.minimum_spanning_tree(G)
   logging.info('Spanning tree node count= %d'%(len(list(span_tree.nodes()))))
   root='S115-E2'
-  processed,line=walk_tree(span_tree,root)
+  processed,node_line,epe,next_ramp=walk_tree(span_tree,root)
+  logging.info('Node line has %d members'%len(node_line))
   logging.info('Processed %d nodes'%len(processed))
+  logging.info('Encountered %d endpoints'%epe)
+  logging.info('Ramp numbers: 0 - %d'%next_ramp)
   draw_graph(span_tree,span_tree_file)
   chains=list(nx.chain_decomposition(G,root=root))
   edge_color=color_edge_sets(G,chains)

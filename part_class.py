@@ -1,5 +1,5 @@
 '''The part class defintion'''
-import math
+from math import asin, degrees, pi
 import numpy as np
 import pandas as pd
 
@@ -51,8 +51,11 @@ def fmt_point(point)->str:
 # geometry functions
 def get_angle(a, b, c):
   '''Angular length for helix.  b is the center, a and c are the wings'''
-  ang = math.degrees(math.atan2(c[1]-b[1], c[0]-b[0]) - math.atan2(a[1]-b[1], a[0]-b[0]))
-  return abs(ang)
+  opposite=get_length(a,c)*.5
+  radius=get_length(a,b)
+  radians=2*abs(asin(opposite/radius))
+  ang = degrees(radians)
+  return ang
 def get_length(point1,point2):
   '''distance between two points'''
   point1=np.array(point1)
@@ -151,8 +154,9 @@ class Part:
         if len(self.end_points)==2:
           self.angular_length=get_angle(a=self.end_points[0][1:3],b=self.center,c=self.end_points[1][1:3])
           radius=get_length(self.end_points[0][1:3],self.center)
-          self.length=round((self.angular_length/360)* 2* math.pi * radius,6)
+          self.length=round((self.angular_length/360)* 2* pi * radius,6)
           self.revs=self.angular_length/360
+          pass
       case 'TURNOUT':
         pass
 
@@ -191,9 +195,11 @@ class Part:
             path_len+=[abs(get_length(seg['point1'],step_end_point))]
             step_divergence+=[0]
           case 'C': # in the case of curves also alter the angle
-            path_len+=[(seg['swing']/360)* 2* math.pi * abs(seg['radius'])]
+            path_len+=[(seg['swing']/360)* 2* pi * abs(seg['radius'])]
             step_divergence+=[seg['swing']*np.sign(seg['radius'])]
         path['length']=round(sum(path_len),6)
+        assert path['length'] !=np.nan, 'length is nan'
+        assert path['length'] >0, 'length is zero!'
         path['divergence']=sum(step_divergence)
 
   def has_connection_to(self,id):
