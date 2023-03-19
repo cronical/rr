@@ -171,13 +171,13 @@ def draw_graph(G,path,pos,node_labels=None,node_colors=None,edge_labels=None,edg
   plt.axis('off')
   plt.tight_layout(pad=0)
 
-  options={'node_color':node_colors,'with_labels':False,'node_size':50,'edge_color':edge_color,'width':3}
+  options={'node_color':node_colors,'with_labels':False,'node_size':40,'edge_color':edge_color,'width':3}
   nx.draw_networkx(G, pos,**options)
   if node_labels:
-    options={'horizontalalignment':'right','verticalalignment':'bottom','font_size':8,'font_color':'k','font_weight':'bold'}
+    options={'horizontalalignment':'right','verticalalignment':'top','font_size':6,'font_color':'k','font_weight':'bold'}
     nx.draw_networkx_labels(G,pos,node_labels,**options)
   if edge_labels:
-    options={'font_size':6,'rotate':False}
+    options={'font_size':6,'rotate':False,'font_color':'b'}
     nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,**options)
 
   plt.savefig(path)
@@ -322,7 +322,7 @@ def drawing_decorations(G):
     '''
   node_labels=nx.get_node_attributes(G,'height')
   node_labels={key:'%.2f  '%(value) for (key,value) in node_labels.items()}
-  node_labels=None
+  #node_labels=None
 
   node_computed=nx.get_node_attributes(G,'computed')
   df=pd.DataFrame(node_computed.values(),index=node_computed.keys(),columns=['computed'])
