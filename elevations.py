@@ -121,7 +121,7 @@ def parts_to_graph(parts):
         for node_id,height in nodes.items():
           G.add_node(node_id,height=height)
         u,v=nodes.keys()
-        G.add_edge(u,v,length=part.length,part_id=str(part),weight=1)#/part.length)
+        G.add_edge(u,v,length=part.length,part_id=str(part),weight=part.length)
         pass
       case 'TURNOUT':
         # match up the connections to the paths by
@@ -164,12 +164,13 @@ def parts_to_graph(parts):
   logging.info('Converted to graph')
   return G,pos      
 
-def draw_graph(G,path,pos,node_labels=None,node_colors=None,edge_labels=None,edge_color=None):
+def draw_graph(G,path,pos,node_labels=None,node_colors=None,edge_labels=None,edge_color=None,title=None):
   '''Draw the graph and store at path
   pos is used for the node locations'''
   plt.figure(figsize=(20,10),)
-  plt.axis('off')
-  plt.tight_layout(pad=0)
+  #plt.axis('off')
+  if title:
+    plt.title(title)
 
   options={'node_color':node_colors,'with_labels':False,'node_size':40,'edge_color':edge_color,'width':3}
   nx.draw_networkx(G, pos,**options)
@@ -177,9 +178,8 @@ def draw_graph(G,path,pos,node_labels=None,node_colors=None,edge_labels=None,edg
     options={'horizontalalignment':'right','verticalalignment':'top','font_size':6,'font_color':'k','font_weight':'bold'}
     nx.draw_networkx_labels(G,pos,node_labels,**options)
   if edge_labels:
-    options={'font_size':6,'rotate':False,'font_color':'b'}
+    options={'font_size':6,'rotate':True,'font_color':'b'}
     nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,**options)
-
   plt.savefig(path)
   logging.info('Displayed graph in file %s'%(path))
 
@@ -346,16 +346,31 @@ def main():
   physcial_file=base+config['physical_graph_file']
   logical_file=base+config['logical_graph_file']
   span_tree_file=base+config['span_tree_file']
+  dfs_seq_file=base+config['dfs_seq_file']
+
+
   parts=read_input(in_file=in_file)
   parts=parts_as_dict(parts)
   logging.info (f'input file has {len(parts)} parts')
   G,physical_pos=parts_to_graph(parts)
   logging.info('Graph has %d nodes'%len(list(G.nodes())))
 
+  # find a root on a siding
+  edges=list(G.edges)
+  root_candidates=[a for (a,b) in edges if 'E' in a]+[b for (a,b) in edges if 'E' in b]
+  root=root_candidates[0]
+
+  # experiment with edge_dfs
+  dfs=list(nx.edge_dfs(G,root_candidates[0]))
+  edge_labels={key:'%d'%(sequence) for sequence,key in enumerate (dfs)}
+  options={'edge_labels':edge_labels,'title':'Sequences for depth first search starting at '+root_candidates[0]}
+  draw_graph(G,dfs_seq_file,physical_pos,**options)
+
+
   # create a spanning tree so it can be walked to set heights
   span_tree = nx.minimum_spanning_tree(G,weight='length')
   logging.info('Spanning tree node count= %d'%(len(list(span_tree.nodes()))))
-  root='S115-E2'
+
 
   # set the heights
   processed,node_line,epe,next_ramp=walk_tree(span_tree,root)
@@ -365,10 +380,10 @@ def main():
   logging.info('Encountered %d endpoints'%epe)
   logging.info('Ramp numbers: 0 - %d'%(next_ramp-1))
 
-  # show spanning tree with ramps by color
+  title='Spanning tree with ramps by color'
   pos=nx.nx_pydot.graphviz_layout(span_tree,prog='neato')
   node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(span_tree)
-  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors}
+  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
   draw_graph(span_tree,span_tree_file,pos,**options)
 
   # transfer the attributes from the spanning tree to the main graph
@@ -379,11 +394,13 @@ def main():
   att={(a[0],a[1]): a[2]for a in ea}
   nx.set_edge_attributes(G,att)
 
-  # show the physical and logical views of the graph itself
+  title='Physical view of the graph itself'
   node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(G)
-  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors}
+  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
   draw_graph(G,physcial_file,physical_pos,**options)
 
+  title='Logical view of the graph itself'
+  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
   pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
   draw_graph(G,logical_file,pos,**options)
 
