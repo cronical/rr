@@ -2,7 +2,11 @@
 pwd: ~/track_plans
 docs: docs/
 xtc: gen2h.xtc
-logical_graph_file: logical_layout.png
-dfs_seq_file: dfs_seq_layout.png
-physical_graph_file: physical_layout.png
-span_tree_file: span_tree.png
+dfs_ramps_file: dfs_seq.svg
+dfs_physical_file: dfs_physical.svg
+dfs_logical_file: dfs_logical.svg
+# spanning tree files
+st_ramps_file: st_ramps.svg
+st_physical_file: st_physical.svg
+st_logical_file: st_logical.svg
+show_only: True

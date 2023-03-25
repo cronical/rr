@@ -15,7 +15,8 @@ import yaml
 
 from part_class import Part,fmt_node_id
 
-COLOR_SET=list(mcolors.TABLEAU_COLORS.keys())
+color_na='tab:red'
+COLOR_SET=list(set(mcolors.TABLEAU_COLORS.keys())-set([color_na]))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -164,25 +165,6 @@ def parts_to_graph(parts):
   logging.info('Converted to graph')
   return G,pos      
 
-def draw_graph(G,path,pos,node_labels=None,node_colors=None,edge_labels=None,edge_color=None,title=None):
-  '''Draw the graph and store at path
-  pos is used for the node locations'''
-  plt.figure(figsize=(20,10),)
-  #plt.axis('off')
-  if title:
-    plt.title(title)
-
-  options={'node_color':node_colors,'with_labels':False,'node_size':40,'edge_color':edge_color,'width':3}
-  nx.draw_networkx(G, pos,**options)
-  if node_labels:
-    options={'horizontalalignment':'right','verticalalignment':'top','font_size':6,'font_color':'k','font_weight':'bold'}
-    nx.draw_networkx_labels(G,pos,node_labels,**options)
-  if edge_labels:
-    options={'font_size':6,'rotate':True,'font_color':'b'}
-    nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,**options)
-  plt.savefig(path)
-  logging.info('Displayed graph in file %s'%(path))
-
 def walk_tree(tree,current_node,processed=[],node_line=[],depth=0,next_ramp=0):
   '''follow each branch/stem on the tree
   tree is a spanning tree as a networkx graph
@@ -316,93 +298,272 @@ def walk_tree(tree,current_node,processed=[],node_line=[],depth=0,next_ramp=0):
     logging.debug('Removed line node %s'%removed[0])
   return processed,node_line,epe,next_ramp
 
-def drawing_decorations(G):
-  '''given a graph G, return
-    node_labels, node_colors, edge_labels, edge_colors
+def walk_dfs_list(G,dfs_list):
+  '''walk the results of edge_dfs to to identify ramps, compute new node heights and edge grades
+  '''
+  next_ramp=0
+  default_height=0.5
+  df=pd.DataFrame(columns=['node1','node2','height','length','computed','cum','ramp_id','grade'])
+  for seq,edge_id in enumerate(dfs_list):
+    # add a row into the working dataframe for this edge
+    u,v=edge_id  
+    height=G.nodes[u]['height']
+    length=G.edges[edge_id]['length']
+    df.loc[len(df.index),['node1','node2','height','length']]=[u,v,height,length]
+
+    #When  the section ends, the next edge is not adjacent to node2
+    #this happens when the depth first scan reaches and end and goes back to a previous branch.
+    next_edge=(dfs_list+['PAST END OF LIST'])[seq+1]
+    adj=list(G.neighbors(v)) # adjacent nodes of the to node
+    if next_edge[1] in adj:
+      logging.info('%d. Continuing from %s'%(seq,v))
+    else:
+      logging.info('Section ended on %s'%v)
+      logging.info('Section size is %d'%df.shape[0])
+
+      # add a row for the last node
+      df.loc[len(df.index),['node1','height']]=[v,G.nodes[v]['height']]
+
+      # track if height was computed to allow coloring. 1 is this was computed, 0 for defined
+      df['computed']=(df.height==0).astype(int) 
+
+      # within the section make sure the first and last items are non-zero
+      # if 1st height is zero, fill with first non zero or default
+      if df.head(1)['height'].squeeze()==0:
+        df.at[df.index[0],'height']=(df.loc[df.height!=0,'height'].to_list()+[default_height])[0]
+        n,h=df.head(1)[['node1','height']].values.flatten()
+        logging.warning('Node %s had zero height. Using %.3f'%(n,h))
+
+      # if the last one is zero, fill with most recent non zero height  
+      if df.tail(1)['height'].squeeze()==0:
+        df.at[df.index[-1],'height']=df.loc[df.height!=0,'height'].to_list()[-1]
+        n,h=df.tail(1)[['node1','height']].values.flatten()
+        logging.warning('Node %s had zero height. Using %.3f'%(n,h))
+
+      # break section into ramps
+      df['ramp_id']=(next_ramp-1)+(df.height!=0).astype(int).cumsum(axis=0)
+      ramps=pd.unique(df.ramp_id.head(df.shape[0]-1))# last row is the trailing node, not an edge
+      for ramp in ramps:
+        sel=df.ramp_id==ramp
+        ramp_len=df.loc[sel].length.sum().squeeze()
+        last_height=df.at[df.loc[sel].index.tolist()[-1]+1,'height']#ending height is on next row
+        heights=df.loc[sel].height.to_list()+[last_height]
+        slope=(heights[-1]-heights[0])/ramp_len
+        # put the computed heights in the dataframe for this ramp
+        df.loc[sel,'cum']=df.loc[sel].length.cumsum(axis=0).shift(fill_value=0)
+        df.loc[sel,'height']=df.loc[sel].cum.apply(lambda x: heights[0]+x*slope)
+        df.loc[sel,'grade']=slope*100
+        logging.debug(df)
+      next_ramp=1+df.ramp_id.max()
+
+      # attributes into a dict
+      # the last node may already have been seen
+      seen=(df.loc[df.index[:-1],'node1']==df.at[df.index[-1],'node1']).any()
+      if seen: # if so drop it so node1 can become an index
+        df=df.head(df.shape[0]-1)
+      df.set_index('node1',inplace=True)
+      att=df[['height','computed']].to_dict('index')
+      # and then into the graph
+      nx.set_node_attributes(G,att)
+      logging.debug('Set height for %d nodes'%(len(att)))
+
+      # mark the edges with the ramp (section) number and the grade
+      df.reset_index(inplace=True)
+      dfe=df.head(df.shape[0]-[1,0][seen])# just the edges
+      dfe['edge']=''
+      for ix,row in dfe.iterrows():
+        dfe.at[ix,'edge']=(row['node1'],row['node2'])  
+      dfe.set_index('edge',inplace=True)    
+      att=dfe[['ramp_id','grade']].to_dict('index')
+      nx.set_edge_attributes(G,att)
+      logging.debug('Set ramp_id & grade for %d edges'%dfe.shape[0])
+
+      logging.info('%d. Starting new section from %s'%(seq,u))
+      df=df.head(0)
+  logging.info('walk_dfs_list complete.')
+
+
+def draw_graph(G,pos,path=None,fig_num=1,node_labels=None,node_colors=None,edge_labels=None,edge_color=None,title=None):
+  '''Draw the graph and store at path or show if None
+  pos is used for the node locations'''
+  plt.figure(figsize=(20,10),)
+  #plt.axis('off')
+  if title:
+    plt.title(title)
+
+  options={'node_color':node_colors,'with_labels':False,'node_size':40,'edge_color':edge_color,'width':3}
+  nx.draw_networkx(G, pos,**options)
+  if node_labels:
+    options={'horizontalalignment':'right','verticalalignment':'top','font_size':6,'font_color':'k','font_weight':'bold'}
+    nx.draw_networkx_labels(G,pos,node_labels,**options)
+  if edge_labels:
+    options={'font_size':6,'rotate':True,'font_color':'b'}
+    nx.draw_networkx_edge_labels(G,pos,edge_labels=edge_labels,**options)
+  if path:
+    plt.savefig(path)
+    logging.info('Displayed graph in file %s'%(path))
+  else:
+    plt.show(block=False)
+
+def drawing_decorations(G,node_info,edge_info):
+  '''given a graph G and parameters, return items suitable for networkx drawing
+    args:
+      G - a networkx graph
+      node_info - a dict with node parms
+      edge_info - a dict with edge parms
+      the parm dicts are:
+        key     value
+        label   attribute name to use or None
+        fmt     a % format style including the %
+        color_by attribute name or None  (if given must be integer)
+        color_set the set of colors to cycle through
+        color_na the color to use for not available - should not be in color_set
+
+    return: node_labels, node_colors, edge_labels, edge_colors
     '''
-  node_labels=nx.get_node_attributes(G,'height')
-  node_labels={key:'%.2f  '%(value) for (key,value) in node_labels.items()}
-  #node_labels=None
+  result=[]
+  
+  for ix,info in enumerate([node_info,edge_info]):
+    get_key_funcs=G.nodes(),G.edges()
+    get_attr_funcs=nx.get_node_attributes,nx.get_edge_attributes
+    labels=None
+    if info['label'] is not None:
+      labels=get_attr_funcs[ix](G,info['label'])
+      labels={key:info['fmt']%(value) for (key,value) in labels.items()}
+    result.append(labels)
 
-  node_computed=nx.get_node_attributes(G,'computed')
-  df=pd.DataFrame(node_computed.values(),index=node_computed.keys(),columns=['computed'])
-  node_colors=[COLOR_SET[(8,1)[a]]for a in df.computed.to_list()] # orange for computed, yellow for defined
+    colors=None
+    if info['color_by']is not None: # handles missing values
+      key_list=list(get_key_funcs[ix])# list all nodes or edges
+      if isinstance(key_list[0],tuple):
+        df=pd.DataFrame.from_records(key_list)
+      else:
+        df=pd.DataFrame(key_list)
+      df.set_index(list(df.columns),inplace=True)
+      df['attribute']=0
+      attribute=get_attr_funcs[ix](G,info['color_by'])
+      for key,value in attribute.items():
+        df.loc[key,'attribute']=value
+      color_set=info['color_set']
+      colors=df.attribute.to_list()
+      for i,val in enumerate(colors):
+        if pd.isna(val):
+          colors[i]=info['color_na']
+        else:
+          colors[i]=color_set[int(val) % len(color_set)]
+    result.append(colors)
+  result=tuple(result)
+  return result
 
-  edge_labels=nx.get_edge_attributes(G,'grade')
-  edge_labels={key:'%.2f  '%(value) for (key,value) in edge_labels.items()}
 
-  edge_ramps=nx.get_edge_attributes(G,'ramp_id')
-  df=pd.DataFrame(edge_ramps.values(),index=edge_ramps.keys(),columns=['ramp'])
-  edge_colors=[COLOR_SET[a%len(COLOR_SET)]for a in df.ramp.to_list()]
-    
-  return node_labels,node_colors,edge_labels,edge_colors
+def file_path(method,chart,config):
+  '''Produce a file name or None as needed from args'''
+  if config['show_only']:
+    return None
+  else:
+    base=config['docs']
+    file_ctrl={k:base+v for (k,v) in config.items() if k.endswith('file')}
+    return file_ctrl['_'.join([method,chart,'file'])]
+
 
 def main():
   '''the main routine'''
   with open ('config.yaml',encoding='UTF-8') as f:
     config=yaml.safe_load(f)
   in_file=config['pwd']+path.sep+config['xtc']
-  base=config['docs']
-  physcial_file=base+config['physical_graph_file']
-  logical_file=base+config['logical_graph_file']
-  span_tree_file=base+config['span_tree_file']
-  dfs_seq_file=base+config['dfs_seq_file']
-
-
+    
   parts=read_input(in_file=in_file)
   parts=parts_as_dict(parts)
   logging.info (f'input file has {len(parts)} parts')
   G,physical_pos=parts_to_graph(parts)
   logging.info('Graph has %d nodes'%len(list(G.nodes())))
+  logging.info('Graph has %d edges'%len(list(G.edges())))
 
   # find a root on a siding
   edges=list(G.edges)
   root_candidates=[a for (a,b) in edges if 'E' in a]+[b for (a,b) in edges if 'E' in b]
   root=root_candidates[0]
 
-  # experiment with edge_dfs
-  dfs=list(nx.edge_dfs(G,root_candidates[0]))
-  edge_labels={key:'%d'%(sequence) for sequence,key in enumerate (dfs)}
-  options={'edge_labels':edge_labels,'title':'Sequences for depth first search starting at '+root_candidates[0]}
-  draw_graph(G,dfs_seq_file,physical_pos,**options)
+  for method in ('dfs','st'):
 
+    if method=='dfs':
+      # DEPTH FIRST SEARCH METHOD
+      dfs=list(nx.edge_dfs(G,root_candidates[0]))
 
-  # create a spanning tree so it can be walked to set heights
-  span_tree = nx.minimum_spanning_tree(G,weight='length')
-  logging.info('Spanning tree node count= %d'%(len(list(span_tree.nodes()))))
+      # set the heights (modifies G)
+      walk_dfs_list(G,dfs)
 
+      bi_color=[COLOR_SET[8],COLOR_SET[1]]# orange for computed, yellow for defined
+      node_info={'label':'height','fmt':'%.2f','color_by':'computed','color_set':bi_color,'color_na':color_na}
+      edge_info={'label':'ramp_id','fmt':'%d','color_by':'ramp_id','color_set':COLOR_SET,'color_na':color_na}
+      for chart in ('ramps','physical','logical'):
+        file_name=file_path(method,chart,config)
+        if chart == 'ramps':
+          # chart with sequence number labels on edges
+          title='Sequences for depth first search starting at '+root_candidates[0]
+          edge_labels={key:'%d'%(sequence) for sequence,key in enumerate (dfs)}
+          options={'edge_labels':edge_labels,'title':title}
+          pos=physical_pos
+        if chart in ['physical','logical']:
+          title=chart.title()+' view - based on depth first search'
+          edge_info['label']='ramp_id'
+          edge_info['fmt']='%d'
+          node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(G,node_info,edge_info)
+          options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
+        if chart=='physical':
+          pos=physical_pos
+        if chart=='logical':
+          pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
+          options['edge_labels']=None
+        draw_graph(G,pos,file_name,**options)
 
-  # set the heights
-  processed,node_line,epe,next_ramp=walk_tree(span_tree,root)
+    if method =='st':
+      # SPANNING TREE METHOD - TO SHOW ITS DEFECTS
+      G,physical_pos=parts_to_graph(parts) # fresh copy of G
 
-  logging.info('Node line has %d members'%len(node_line))
-  logging.info('Processed %d nodes'%len(processed))
-  logging.info('Encountered %d endpoints'%epe)
-  logging.info('Ramp numbers: 0 - %d'%(next_ramp-1))
+      # create a spanning tree so it can be walked to set heights
+      st_ramps = nx.minimum_spanning_tree(G,weight='length')
+      logging.info('Spanning tree node count= %d'%(len(list(st_ramps.nodes()))))
 
-  title='Spanning tree with ramps by color'
-  pos=nx.nx_pydot.graphviz_layout(span_tree,prog='neato')
-  node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(span_tree)
-  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
-  draw_graph(span_tree,span_tree_file,pos,**options)
+      # set the heights
+      processed,node_line,epe,next_ramp=walk_tree(st_ramps,root)
 
-  # transfer the attributes from the spanning tree to the main graph
-  att=dict(span_tree.nodes(data=True))
-  nx.set_node_attributes(G,att)
+      logging.info('Node line has %d members'%len(node_line))
+      logging.info('Processed %d nodes'%len(processed))
+      logging.info('Encountered %d endpoints'%epe)
+      logging.info('Ramp numbers: 0 - %d'%(next_ramp-1))
+      
+      # transfer the attributes from the spanning tree to the main graph
+      att=dict(st_ramps.nodes(data=True))
+      nx.set_node_attributes(G,att)
 
-  ea=list(span_tree.edges(data=True))
-  att={(a[0],a[1]): a[2]for a in ea}
-  nx.set_edge_attributes(G,att)
+      ea=list(st_ramps.edges(data=True))
+      att={(a[0],a[1]): a[2]for a in ea}
+      nx.set_edge_attributes(G,att)
 
-  title='Physical view of the graph itself'
-  node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(G)
-  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
-  draw_graph(G,physcial_file,physical_pos,**options)
+      for chart in ('ramps','physical','logical'):
+        file_name=file_path(method,chart,config)
+        if chart == 'ramps':
+          graph=st_ramps
+          title='Spanning tree with ramps by color'
+          pos=nx.nx_pydot.graphviz_layout(st_ramps,prog='neato')
+          node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(st_ramps,node_info,edge_info)
+          options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
 
-  title='Logical view of the graph itself'
-  options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
-  pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
-  draw_graph(G,logical_file,pos,**options)
+        if chart in ['physical','logical']:
+          graph=G
+          title=chart.title()+' view of the graph itself - based on spanning tree'
+          node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(G,node_info,edge_info)
+          options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
 
+        if chart=='physical':          
+          pos=physical_pos
+
+        if chart=='logical':
+          pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
+          options['edge_labels']=None
+
+        draw_graph(graph,pos,file_name,**options)
+  input('Press enter to close: ')  
 if __name__=='__main__':
   main()
