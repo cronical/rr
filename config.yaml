@@ -9,4 +9,4 @@ dfs_logical_file: dfs_logical.svg
 st_ramps_file: st_ramps.svg
 st_physical_file: st_physical.svg
 st_logical_file: st_logical.svg
-show_only: True
+show_only: False
