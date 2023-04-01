@@ -1,6 +1,8 @@
 # configuration items
 pwd: ~/track_plans
 docs: docs/
+onshape: on_shape/
+csv_file: xyz.csv
 xtc: gen2h.xtc
 dfs_ramps_file: dfs_seq.svg
 dfs_physical_file: dfs_physical.svg

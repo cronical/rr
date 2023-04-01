@@ -11,7 +11,7 @@ That file is read by custom Python code and graph object is generated with the P
 The logical layout uses the Graphviz "neato" layout.  The physical layout uses the original (x,y) coordinates from xtrkcad, but with straight edges.
 
 ## Depth First Search
-This method seems to resolve the problem with the un-walked edges that occurs with the [](#spanning-tree) method.
+This method seems to resolve the problem with the un-walked edges that occurs with the [Spanning tree](#spanning-tree) method.
 
 ![Depth first search sequence numbers](./dfs_seq.svg)
 ![Logical layout](./dfs_logical.svg)

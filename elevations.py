@@ -387,7 +387,6 @@ def draw_graph(G,pos,path=None,fig_num=1,node_labels=None,node_colors=None,edge_
   '''Draw the graph and store at path or show if None
   pos is used for the node locations'''
   plt.figure(figsize=(20,10),)
-  #plt.axis('off')
   if title:
     plt.title(title)
 
@@ -492,6 +491,15 @@ def main():
 
       # set the heights (modifies G)
       walk_dfs_list(G,dfs)
+      # write the csv file
+      att=dict(G.nodes(data=True))
+      xy=pd.DataFrame(physical_pos).T.reset_index()
+      z=pd.DataFrame(att).T['height'].reset_index()
+      xyz=xy.merge(z,on='index')
+      xyz.drop(columns='index',inplace=True)
+      xyz.columns=['x','y','z']
+      xyz.to_csv(config['onshape'] + config['csv_file'])
+      logging.info('xyz data from depth first search written to %s'%config['onshape'] + config['csv_file'])
 
       bi_color=[COLOR_SET[8],COLOR_SET[1]]# orange for computed, yellow for defined
       node_info={'label':'height','fmt':'%.2f','color_by':'computed','color_set':bi_color,'color_na':color_na}
@@ -516,6 +524,9 @@ def main():
           pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
           options['edge_labels']=None
         draw_graph(G,pos,file_name,**options)
+
+      
+
 
     if method =='st':
       # SPANNING TREE METHOD - TO SHOW ITS DEFECTS
