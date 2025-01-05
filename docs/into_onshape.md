@@ -45,7 +45,7 @@ y: -52.008 -0.5 = -52.508
 
 Test this with another point
 
-Original endpoint on curved track as shown on xtrkcad ui:
+Original endpoint on curved track (T168) as shown on xtrkcad ui:
 49.635, 18.898
 + adj is
 -65.157, -33.61

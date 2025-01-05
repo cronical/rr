@@ -49,6 +49,16 @@ def fmt_point(point)->str:
   return '(%.6f, %.6f)'%(x,y)
 
 # geometry functions
+def add_points(a,b):
+  '''offset point a by amounts in b
+  '''
+  return ((a[0]+b[0]),(a[1]+b[1]))
+
+def mid_point(a,b):
+  '''return the midpoint between two points
+  '''
+  return ((a[0]+b[0])/2,(a[1]+b[1])/2)
+
 def get_angle(a, b, c):
   '''Angular length for helix.  b is the center, a and c are the wings'''
   opposite=get_length(a,c)*.5
@@ -64,6 +74,8 @@ def get_length(point1,point2):
   distance=round(distance,6)
   return distance
   #self.length = ((x1 - x2)**2 + (y1 - y2)**2)**0.5
+
+
 
 class Part:
   '''represents a piece of track with end points, and paths'''
@@ -182,9 +194,53 @@ class Part:
     self.paths+=[path]
   
   def  validate_turnout(self):
-    '''once all the paths and segments are input, validate and calcuate length and divergence'''
+    '''Validate turnout definitions. Sets the following for each path
+    - length, 
+    - "divergence", and 
+    - link - a pair of connection numbers that are connected by the path
+    Run once all the paths and segments are in place.
+    Crossings (and others that need to have more than one path active at a time) use a multi-path notation
+      Crossings have a single path with record but it defines multiple paths separated by a 0.
+      These are converted to multiple path records, each with its own length and divergence
+      For crossings,  divergence is the angle of incidence
+    '''
     assert self.part_type=='TURNOUT'
-    for path in self.paths:    
+
+    # split out multiple paths for cross overs
+    cross_over=False
+    new_paths=[]    
+    for path in self.paths:
+      steps=path['steps'].copy()
+      while 0 in steps:
+        ix=steps.index(0)
+        p=path.copy()
+        p['steps']=steps[0:ix]
+        new_paths+=[p]
+        steps=steps[ix+1:]
+        cross_over=True
+      if steps:
+        p=path.copy()
+        p['steps']=steps
+        new_paths+=[p]        
+    self.paths=new_paths
+
+    links=[]
+    if cross_over:
+      df=pd.DataFrame(self.end_points,columns=['node','x','y','z','angle'])
+      angles=df['angle']
+      for ix,row in df.iterrows():
+        angle=row['angle']
+        if angle<180:
+          sel=.000001>abs((angle+180)-angles)
+          #sel=[.000001> abs((angle+180)-a) for a in ep_angles]
+          assert sum(sel)==1,'Did not find unique other node'
+          links+=[(int(row['node']),int(df.loc[sel,'node'].squeeze()))]
+      pass    
+    for px,path in enumerate(self.paths):    
+      if cross_over: 
+        path['link']=links[px] # this does not seem like it ensures the correct mapping
+      else:
+        path['link']= None
       path_len=[]
       step_divergence=[]
       for sn in path['steps']:
@@ -193,10 +249,17 @@ class Part:
           case 'S':
             step_end_point=seg['point2']
             path_len+=[abs(get_length(seg['point1'],step_end_point))]
-            step_divergence+=[0]
+            angle=0
+            if (px>0) and cross_over:
+              # figure the "divergence" angle for crossings
+              mid=mid_point((seg['point1']),step_end_point)
+              angle=get_angle(seg['point1'],mid,prior['point1'])
+            step_divergence+=[angle]
           case 'C': # in the case of curves also alter the angle
+            assert (not cross_over),'Unexpected curve in a cross over'
             path_len+=[(seg['swing']/360)* 2* pi * abs(seg['radius'])]
             step_divergence+=[seg['swing']*np.sign(seg['radius'])]
+        prior=seg # save for crossover angle calc
         path['length']=round(sum(path_len),6)
         assert path['length'] !=np.nan, 'length is nan'
         assert path['length'] >0, 'length is zero!'

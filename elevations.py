@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from part_class import Part,fmt_node_id
+from part_class import Part,fmt_node_id, add_points
 
 color_na='tab:red'
 COLOR_SET=list(set(mcolors.TABLEAU_COLORS.keys())-set([color_na]))
@@ -79,16 +79,19 @@ def write_csv(df,out_file):
   df.to_csv(out_file,sep=',')
   logging.debug (f'Wrote output to: {out_file}')
 
-def step_len_div(part) -> list:
-  '''for a turnout part, inspect the paths, get the length and the angle of divergence for each path
-  returns list lengths, and list of divergenced in degrees
+def path_info(part) -> list:
+  '''for a turnout part, return paths info as a dataframe
+  length
+  divergence (angle in degrees)
+  link_from
+  link_to
   '''
-  lens=[]
-  divs=[]
-  for path in part.paths:
-    lens+=[path['length']]
-    divs+=[path['divergence']]
-  return lens,divs
+  df=pd.DataFrame([],columns=['length','divergence','link_from','link_to'])
+  for px,path in enumerate(part.paths):
+    a,b=(None,None)
+    if path['link'] is not None: a,b= path['link']
+    df.loc[px]={'length':path['length'],'divergence':path['divergence'],'link_from':a,'link_to':b}
+  return df
 
 def parts_as_dict(parts_list):
   '''convert parts list to a dict'''
@@ -125,29 +128,34 @@ def parts_to_graph(parts):
         G.add_edge(u,v,length=part.length,part_id=str(part),weight=part.length)
         pass
       case 'TURNOUT':
-        # match up the connections to the paths by
-        # 1) finding the set of segments that are shared by paths (assert this is singular)
-        # 2) locate this in the connections pool by start point
+        # match up the connections to the paths
+        # for normal turnouts this is done by
+        # 1) locate this in the connections pool by start point
+        # 2) finding the set of segments that are shared by paths (assert this is singular)
         # 3) Compute the divergence in degrees for each path
         # 4) Use the divergence angle as the index into the connection pool to complete the mapping
-        common_segments=list(set.intersection(*[set(p['steps']) for p in part.paths]))
-        assert len(common_segments)==1
-        start_point=np.asarray(part.turnout_orig[0:2]) # this is the actual start point (no offset)
 
-        # 2) locate this in the connections pool by start point
-        ep_df=pd.DataFrame(part.end_points)
-        ep_df.columns=['connects_to','x','y','z','angle']
+        # 1) locate this in the connections pool by start point
+        start_point=np.asarray(part.turnout_orig[0:2]) # this is the actual start point (no offset)
+        ep_df=pd.DataFrame(part.end_points,columns=['connects_to','x','y','z','angle'])
         sel=(ep_df[['x','y']]==start_point).all(axis=1)
         assert 1==sel.sum()
         node_start,angle_start=ep_df.loc[sel,['connects_to','angle']].squeeze().tolist()
-        from_node_id=fmt_node_id(parts[part.id],connects_to=parts[node_start])
+        from_node_id=fmt_node_id(parts[part.id],connects_to=parts[node_start]) # fails on sectional track as end point of a siding (coded as a turnout), also curves
         xyz=np.array(ep_df.loc[sel,['x','y','z']].squeeze())
         from_height=xyz[2]
         pos[from_node_id]=xyz[0:2]
-        path_lengths,path_divergences=step_len_div(part)
+        pdl=path_info(part)
         G.add_node(from_node_id,height=from_height)
 
-        pdl=pd.DataFrame({'divergence':path_divergences,'length':path_lengths})
+        cross_over=part.mfg_info[1].lower().endswith('crossing')# crossings
+        if cross_over:
+          # these have one path statement which contains a delimiter of 0 between the segment references
+          pass
+        else: # normal turnouts
+          common_segments=list(set.intersection(*[set(p['steps']) for p in part.paths]))
+          assert len(common_segments)==1
+
         for ix,row in pdl.iterrows():
           angle_end=row['divergence']+(180+angle_start)%360 # the other end is going the opposite direction
           sel=np.isclose(ep_df['angle'],angle_end,.001)
@@ -158,8 +166,19 @@ def parts_to_graph(parts):
           pos[to_node_id]=xyz[0:2]
           part_path=str(part)+'-%d'%(ix+1)
           G.add_node(to_node_id,height=xyz[2])
+          # in normal turnouts every path is connected to the start, but crossovers each path is separate
+          if cross_over:
+            # locate corresponding node
+            sel=(pdl['link_to']==to) | (pdl['link_from']==to)
+            assert sum(sel)==1,'expecting exactly one'
+            s=set(pdl.loc[sel,['link_to','link_from']].squeeze())
+            s.remove(to)
+            node_start=list(s)[0]
+            from_node_id=fmt_node_id(parts[part.id],connects_to=parts[node_start])
+
+            pass
           G.add_edge(from_node_id,to_node_id,length=row['length'],part_id=part_path,weight=1/row['length'])
-        pass
+          pass
   for node in G.nodes:
     assert node in pos,'missing position'  
   logging.info('Converted to graph')
@@ -244,15 +263,15 @@ def walk_tree(tree,current_node,processed=[],node_line=[],depth=0,next_ramp=0):
           for edg in (e,(e[1],e[0])):
             if edg in edge_ids:
               edge_lens[edge_ids.index(edg)]=datadict['length']
-        df['length']=0
+        df['length']=0.0
         df.loc[nodes[:-1],'length']=edge_lens # all the found lengths are now in the dataframe
 
         if (df.length.head(-1)==0).values.any():  # display those not found
           logging.error('Bad length at')
           logging.error(df.loc[df.length==0])
-        start_height=df.head(1).height
+        start_height=df.head(1).height.squeeze()
         ramp_len=df.length.sum().squeeze()
-        slope=(height-start_height).squeeze()/ramp_len
+        slope=(height-start_height)/ramp_len
         s,e=df.index.values[1],df.index.values[-1]
         logging.info('Ramp %d. %d edges: [%s...%s] Heights: %.3f %.3f. Tot len: %.3f. Grade: %.3f'%(next_ramp,ramp_size-1,s,e,start_height,height,ramp_len,slope*100))
 
@@ -302,7 +321,7 @@ def walk_dfs_list(G,dfs_list):
   '''walk the results of edge_dfs to to identify ramps, compute new node heights and edge grades
   '''
   next_ramp=0
-  default_height=0.5
+  default_height=1.0 # must be non-zero
   df=pd.DataFrame(columns=['node1','node2','height','length','computed','cum','ramp_id','grade'])
   for seq,edge_id in enumerate(dfs_list):
     # add a row into the working dataframe for this edge
@@ -345,7 +364,7 @@ def walk_dfs_list(G,dfs_list):
       ramps=pd.unique(df.ramp_id.head(df.shape[0]-1))# last row is the trailing node, not an edge
       for ramp in ramps:
         sel=df.ramp_id==ramp
-        ramp_len=df.loc[sel].length.sum().squeeze()
+        ramp_len=df.loc[sel].length.sum() #.squeeze()
         last_height=df.at[df.loc[sel].index.tolist()[-1]+1,'height']#ending height is on next row
         heights=df.loc[sel].height.to_list()+[last_height]
         slope=(heights[-1]-heights[0])/ramp_len
@@ -478,7 +497,7 @@ def main():
   logging.info('Graph has %d nodes'%len(list(G.nodes())))
   logging.info('Graph has %d edges'%len(list(G.edges())))
 
-  # find a root on a siding
+  # find a root on a siding (assumes at least one)
   edges=list(G.edges)
   root_candidates=[a for (a,b) in edges if 'E' in a]+[b for (a,b) in edges if 'E' in b]
   root=root_candidates[0]
@@ -503,7 +522,7 @@ def main():
 
       bi_color=[COLOR_SET[8],COLOR_SET[1]]# orange for computed, yellow for defined
       node_info={'label':'height','fmt':'%.2f','color_by':'computed','color_set':bi_color,'color_na':color_na}
-      edge_info={'label':'ramp_id','fmt':'%d','color_by':'ramp_id','color_set':COLOR_SET,'color_na':color_na}
+      edge_info={'label':'ramp_id','fmt':'%d','color_by':'ramp_id','color_set':COLOR_SET,'color_na':color_na} 
       for chart in ('ramps','physical','logical'):
         file_name=file_path(method,chart,config)
         if chart == 'ramps':
@@ -514,15 +533,15 @@ def main():
           pos=physical_pos
         if chart in ['physical','logical']:
           title=chart.title()+' view - based on depth first search'
-          edge_info['label']='ramp_id'
-          edge_info['fmt']='%d'
+          edge_info['label']='part_id'#'ramp_id'
+          edge_info['fmt']='%s'#'%d'
           node_labels, node_colors, edge_labels, edge_colors=drawing_decorations(G,node_info,edge_info)
           options={'node_labels':node_labels,'node_colors':node_colors,'edge_labels':edge_labels,'edge_color':edge_colors,'title':title}
         if chart=='physical':
           pos=physical_pos
         if chart=='logical':
           pos=nx.nx_pydot.graphviz_layout(G,prog='neato')
-          options['edge_labels']=None
+          #options['edge_labels']=None
         draw_graph(G,pos,file_name,**options)
 
       
